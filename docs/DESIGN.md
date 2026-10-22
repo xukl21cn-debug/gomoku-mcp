@@ -1,6 +1,6 @@
 # 五子棋 MCP 对弈系统 · 设计文档
 
-> 版本：v0.3（可扩展设计 + AI 思考展示）
+> 版本：v0.4（AI 互动解说 + docs 目录）
 > 日期：2026-10-22
 > 项目路径：`E:\code\fun\gomoku-mcp`
 > 技术栈：Node.js + TypeScript（单进程后端） / Vite + React（前端）
@@ -18,14 +18,17 @@
 - 默认人类执黑、AI 执白；网页可选择执黑 / 执白
 - UI：极简木色棋盘 + 深色背景
 - v1 不做悔棋
-- 网页展示 AI 思考内容（通过 `report_thought`，见 §3）
-- 首批联调客户端：Command Code、zcode、dsh（暂不实测 Claude Code / Codex）
+- 网页展示 **AI 互动解说**（通过 `say` 工具）：评价人类落子、评论局势、输赢与被偷袭时的反应；不追求完整输出模型推理
+- 解说文本上限 2000 字符，超出截断；面板滚动展示
+- 首批联调客户端：Command Code（开发验证）、zcode（GUI JSON 配置）
+- dsh 使用 cordis 配置，等 zcode 跑通后由用户自行接入
+- 默认房间号：`default`
 
 ### 1.2 v1 范围
 
 - 15×15 标准无禁手五子棋，黑先，五连（含长连）获胜
 - 房间模型：后端支持多房间，v1 UI 只使用 `default` 房间
-- 浏览器：开局、落子、认输、实时观战、断线重连、AI 思考面板
+- 浏览器：开局、落子、认输、实时观战、断线重连、AI 互动面板
 - MCP：6 个工具，**Streamable HTTP + stdio 双传输**
 - 单进程同时提供页面静态资源、REST/WS、MCP HTTP 入口
 - 本地运行，默认仅监听 `127.0.0.1`
@@ -38,7 +41,7 @@
 - 公网部署、鉴权
 - 数据库持久化（只保留接口缝）
 - AI vs AI 自动编排
-- 逐 token 的 AI 思考流（MCP 模式下做不到，见 §3）
+- 逐 token 的模型推理流（MCP 模式下做不到，见 §3）
 - 依赖 MCP sampling / elicitation / notifications 等客户端高级能力
 
 ---
@@ -67,10 +70,12 @@ sequenceDiagram
     H->>B: POST /api/rooms/default/moves (7,7)
     B-->>H: WS state（turn=white）
     B-->>A: reason=your_turn + state
-    A->>B: MCP report_thought("我准备堵右上…")
-    B-->>H: WS thought
+    A->>B: MCP say("这步抢中路？我不会让你舒服")
+    B-->>H: WS commentary
     A->>B: MCP place_stone (7,8)
     B-->>H: WS state（turn=black）
+    A->>B: MCP say("我现在双三了，你小心")
+    B-->>H: WS commentary
     A->>B: MCP wait_for_turn（下一轮）
 ```
 
@@ -85,7 +90,7 @@ sequenceDiagram
 
 - 默认超时 20s，参数范围 1s–60s
 - **超时不是错误**：返回当前 `state` + `reason=timeout`，工具描述引导 Agent 再次调用
-- Agent 侧推荐循环：`wait_for_turn` → 思考 / `report_thought` → `place_stone` → `wait_for_turn`
+- Agent 侧推荐循环：`wait_for_turn` → `say` → `place_stone` → `say` → `wait_for_turn`
 - 实现：每个 Room 持有 `Set<Waiter>`，状态变更时统一 resolve；每个 waiter 持有定时器
 - 竞态：状态变更在 Room 方法内同步串行完成，每次变更 `version++`；响应始终携带完整 `state`
 - waiter 的 resolve 条件独立于颜色：`status !== 'playing'`、`turn === seat`、`gameId` 变化
@@ -114,7 +119,7 @@ sequenceDiagram
 
 ---
 
-## 3. AI 思考内容：能做什么、不能做什么
+## 3. AI 互动解说：能做什么、不能做什么
 
 ### 3.1 能力边界
 
@@ -123,37 +128,68 @@ sequenceDiagram
 因此：
 
 - 做不到「把模型正在生成的思考逐 token 转发到网页」
-- 能做到「模型主动调用工具，上报一段思考摘要，网页实时展示」
+- 也不需要这样做：产品目标是**互动感**，不是展示模型的完整推理
+- 能做到「模型主动调用工具，对玩家说一句话，网页实时展示」
 - 前端可以在收到文本后做逐字动画，但内容到达时机取决于模型何时调用工具
 - 不同客户端的 MCP 工具调用超时、展示方式不同，但工具通道本身通用
 
-### 3.2 实现方案
+结论：解说是**模型对玩家说的话**，不是模型的隐藏思维链。
+
+### 3.2 互动设计
 
 新增第 6 个 MCP 工具：
 
 ```ts
-report_thought({ roomId?, text }) -> { ok: true, thought }
+say({
+  roomId?: string,
+  text: string,
+  kind?: 'evaluation' | 'position' | 'reaction' | 'result' | 'banter',
+  mood?: 'neutral' | 'confident' | 'happy' | 'nervous' | 'surprised' | 'sad'
+}) -> { ok: true, commentary: Commentary }
 ```
 
-- 工具描述引导模型：**在决定落子前，用 1–3 句话说明判断，再调用 `place_stone`；可多次调用**
-- 服务端把 `Thought` 加入当前房间的思考日志（保留最近 50 条，换局清空）
-- 通过 WebSocket 广播 `thought` 事件
-- 网页「AI 思考」面板追加显示，并在 AI 回合显示「AI 正在思考…」状态
-- 思考通道**不影响棋局状态和 `version`**，是独立事件流
-- 上限 1000 字符，超长截断；空文本拒绝
+`kind` 语义：
 
-### 3.3 实现难度
+| kind | 使用时机 | 示例 |
+|---|---|---|
+| `evaluation` | 人类落子后，评价这一步 | 「这步想抢中路？我偏不让你舒服。」 |
+| `position` | 自己落子后，判断局势 | 「我现在双三了，你只剩一条路。」 |
+| `reaction` | 被偷袭、失误、局势突变 | 「等等，这步我没算到……」 |
+| `result` | 对局结束 | 「GG，下一局我不会留手。」 |
+| `banter` | 闲聊 / 挑衅 / 活跃气氛 | 「你手速挺快，棋还得练。」 |
+
+`mood` 用于前端气泡配色，不参与规则。
+
+行为约定：
+
+- 工具描述引导模型：`wait_for_turn` 返回 `your_turn` 后，先 `say` 评价人类落子，再 `place_stone`
+- 落子后可以再 `say` 一次，评论局势或表达情绪
+- 对局结束时用 `say` 做收尾
+- 每个回合 1–2 条即可，鼓励简短、有个性
+- 上限 2000 字符，超长截断；空文本拒绝
+- **服务端不生成假解说**；所有内容都来自模型。v1 不做「模型没说话时自动填词」
+- 解说是否出现取决于模型是否调用 `say`；提示词里可以明确要求
+
+### 3.3 实现方案
+
+- 服务端把 `Commentary` 加入当前房间的互动日志（保留最近 50 条，换局清空）
+- 通过 WebSocket 广播 `commentary` 事件
+- 网页「AI 互动」面板追加显示，并按 `mood` 着色
+- 互动通道**不影响棋局状态和 `version`**，是独立事件流
+- 重连时通过 WS `hello` 一次性下发最近解说
+
+### 3.4 实现难度
 
 低。属于增量通道，不需要推翻回合同步机制。改动点：
 
-1. `shared` 增加 `Thought` 类型
-2. Room 增加思考日志与事件
-3. REST 增加 `POST /api/rooms/:roomId/thoughts`（stdio 桥接与调试用）
-4. WS 增加 `thought` 消息
-5. MCP 增加 `report_thought` 工具
-6. 前端增加思考面板
+1. `shared` 增加 `Commentary` / `CommentaryKind` / `CommentaryMood`
+2. Room 增加互动日志与事件
+3. REST 增加 `POST /api/rooms/:roomId/commentary`（stdio 桥接与调试用）
+4. WS 增加 `commentary` 消息
+5. MCP 增加 `say` 工具
+6. 前端增加互动面板
 
-### 3.4 未来可选：内置 AI 流式模式
+### 3.5 未来可选：内置 AI 流式模式
 
 如果以后想要真正的逐 token 流，需要另一种模式：后端直接调用 LLM API，边生成边通过 WS 推 token。这与「外部 Agent 通过 MCP 下棋」是两条独立路径，可作为 M7 的可选模式，不影响 v1。
 
@@ -174,6 +210,7 @@ report_thought({ roomId?, text }) -> { ok: true, thought }
 | 持久化 / 回放 | `RoomRepository` 接口 + 纯 JSON 状态 + 历史 | 把内存实现换成 SQLite / 文件 |
 | 禁手 / 规则变体 | `RuleSet` 参数化 | 实现规则校验，新增规则选项 |
 | 观战 | WS 只读订阅，多客户端天然支持 | 增加观众列表 / 权限 |
+| 解说扩展（语音 / 表情） | `Commentary` 的 kind / mood 通道 | 增加 TTS 或前端表现层 |
 | 内置 AI 流式 | 独立事件通道 | 新增 LLM provider，不影响 MCP |
 
 ### 4.2 分层
@@ -203,12 +240,12 @@ web/        只依赖 shared 类型与 REST/WS 协议
 ```
 ┌──────────────────────┐         REST（动作）           ┌─────────────────────────────────────┐
 │  浏览器（React）      │ ─────────────────────────────▶ │  后端（Node + TS，单进程）           │
-│  棋盘 + 思考面板      │ ◀───────────────────────────── │                                     │
-└──────────────────────┘   WebSocket（state/thought）   │   ┌──────────────┐                  │
+│  棋盘 + 互动面板      │ ◀───────────────────────────── │                                     │
+└──────────────────────┘  WebSocket（state/commentary） │   ┌──────────────┐                  │
                                                         │   │ RoomManager  │                  │
 ┌──────────────────────┐   MCP Streamable HTTP          │   └──────┬───────┘                  │
 │  Agent A（支持 HTTP） │ ─────────────────────────────▶ │   ┌──────┴───────┐                  │
-└──────────────────────┘                                 │   │  GameRoom(s) │ 状态/等待者/思考 │
+└──────────────────────┘                                 │   │  GameRoom(s) │ 状态/等待者/互动 │
                                                         │   └──────┬───────┘                  │
 ┌──────────────────────┐  MCP stdio   ┌────────────┐    │   ┌──────┴───────┐                  │
 │  Agent B（仅 stdio）  │ ───────────▶ │ stdio 桥接 │───┼──▶│  GameEngine  │ 纯规则            │
@@ -222,7 +259,7 @@ web/        只依赖 shared 类型与 REST/WS 协议
 - HTTP MCP 与 REST/WS 同进程，直接共享 `RoomManager`
 - stdio 桥接是独立进程，但**不持有棋局状态**，所有操作通过 REST 代理回后端
 - 若每个 Agent 各起一个 stdio 进程且各自持有状态，会出现「各下一局」的错误，必须避免
-- 思考内容走独立 WS 事件，不进入棋局状态
+- 互动解说走独立 WS 事件，不进入棋局状态
 
 ---
 
@@ -251,15 +288,16 @@ web/        只依赖 shared 类型与 REST/WS 协议
 gomoku-mcp/
 ├── package.json                 # npm workspaces: shared / server / web
 ├── .gitignore
-├── DESIGN.md
-├── README.md                    # 使用说明（实现阶段补）
+├── README.md                    # 项目入口，链接到设计文档
+├── docs/
+│   └── DESIGN.md                # 本文件
 ├── .mcp.json                    # Command Code project 级 MCP 配置
 ├── shared/
 │   ├── package.json             # @gomoku/shared，只放类型与常量
 │   ├── tsconfig.json
 │   └── src/
 │       ├── index.ts
-│       ├── game.ts              # GameState / Move / RuleSet / Thought
+│       ├── game.ts              # GameState / Move / RuleSet / Commentary
 │       └── protocol.ts          # WS 消息、REST DTO
 ├── server/
 │   ├── package.json
@@ -271,7 +309,7 @@ gomoku-mcp/
 │   │   │   ├── rules.ts         # RuleSet、胜负检测、平局
 │   │   │   └── engine.ts        # 纯函数状态转移
 │   │   ├── rooms/
-│   │   │   ├── room.ts          # 单房间：状态、waiters、思考、事件
+│   │   │   ├── room.ts          # 单房间：状态、waiters、互动、事件
 │   │   │   ├── room-manager.ts  # 房间注册与默认房间
 │   │   │   └── repository.ts    # RoomRepository + 内存实现
 │   │   ├── http/
@@ -294,12 +332,12 @@ gomoku-mcp/
         ├── main.tsx
         ├── App.tsx
         ├── api.ts               # REST 封装
-        ├── useRoomSocket.ts     # WS 连接 + 状态 / 思考
+        ├── useRoomSocket.ts     # WS 连接 + 状态 / 互动
         ├── components/
         │   ├── Board.tsx
         │   ├── Stone.tsx
         │   ├── StatusBar.tsx
-        │   ├── ThoughtPanel.tsx
+        │   ├── CommentaryPanel.tsx
         │   └── Controls.tsx
         └── styles.css
 ```
@@ -348,6 +386,21 @@ export type EndReason = 'five' | 'draw' | 'resign';
 export type ParticipantKind = 'human' | 'agent' | 'remote';
 export type Actor = 'human' | 'agent'; // v1
 
+export type CommentaryKind =
+  | 'evaluation'
+  | 'position'
+  | 'reaction'
+  | 'result'
+  | 'banter';
+
+export type CommentaryMood =
+  | 'neutral'
+  | 'confident'
+  | 'happy'
+  | 'nervous'
+  | 'surprised'
+  | 'sad';
+
 export interface Cell {
   row: number;
   col: number;
@@ -371,12 +424,14 @@ export interface Move extends Cell {
   at: string;               // ISO 时间
 }
 
-export interface Thought {
+export interface Commentary {
   id: string;
   roomId: string;
   gameId: string;
   text: string;
-  moveIndex: number;        // 产生思考时的手数
+  kind: CommentaryKind;
+  mood: CommentaryMood;
+  moveIndex: number;        // 说话时的手数
   at: string;
 }
 
@@ -400,7 +455,7 @@ export interface GameState {
 
 export interface RoomView {
   state: GameState;
-  thoughts: Thought[];
+  commentary: Commentary[];
 }
 ```
 
@@ -409,6 +464,7 @@ export interface RoomView {
 - `seats` 取代原来的 `humanColor` / `agentColor`，为人类 vs 人类、多 Agent 留出空间
 - 引擎只认 `StoneColor`，不认 actor；角色映射在 Room 层完成
 - `version` 每个房间单调递增，换局也不重置，前端可直接用它丢弃旧消息
+- `Commentary` 是给玩家看的互动内容，不进入 `GameState`
 
 ### 8.3 错误码
 
@@ -421,7 +477,7 @@ export type ErrorCode =
   | 'OUT_OF_BOUNDS'
   | 'CELL_OCCUPIED'
   | 'NO_AGENT_SEAT'
-  | 'INVALID_THOUGHT';
+  | 'INVALID_COMMENTARY';
 ```
 
 ### 8.4 引擎函数（pure）
@@ -470,10 +526,15 @@ class GameRoom {
   resignBy(actor: Actor): GameState;
 
   waitForSeat(seat: StoneColor, timeoutMs: number): Promise<WaitResult>;
-  reportThought(text: string): Thought;
+
+  say(
+    text: string,
+    kind?: CommentaryKind,
+    mood?: CommentaryMood
+  ): Commentary;
 
   onState(listener: (state: GameState, cause: StateChangeCause) => void): () => void;
-  onThought(listener: (thought: Thought) => void): () => void;
+  onCommentary(listener: (commentary: Commentary) => void): () => void;
 
   getHistory(): readonly Move[]; // 内部/未来回放用
 }
@@ -483,8 +544,8 @@ class GameRoom {
 
 - 持有该房间的唯一 `GameState`
 - 串行化所有变更（Node 单线程，方法内同步完成）
-- 维护 waiter、思考日志、完整落子历史
-- 广播 `state` / `thought` 事件
+- 维护 waiter、互动日志、完整落子历史
+- 广播 `state` / `commentary` 事件
 - 通过 `RoomRepository` 保存可序列化快照（v1 内存实现）
 
 ### 9.2 RoomManager
@@ -512,11 +573,11 @@ class RoomManager {
 - 返回 `{ state, reason }`
 - 超时返回当前 state，不抛错
 
-### 9.4 思考日志
+### 9.4 互动日志
 
-- 每个 Room 保存当前局最近 50 条 `Thought`
+- 每个 Room 保存当前局最近 50 条 `Commentary`
 - 新局开始时清空
-- 通过 `onThought` 推给 WS
+- 通过 `onCommentary` 推给 WS
 - 不进入 `GameState`，不影响 `version`
 - 重连时通过 WS `hello` 一次性下发当前 `RoomView`
 
@@ -542,7 +603,7 @@ interface PersistedRoom {
   id: string;
   state: GameState;
   history: Move[];
-  thoughts: Thought[];
+  commentary: Commentary[];
 }
 ```
 
@@ -568,7 +629,7 @@ v1 使用 `MemoryRoomRepository`，不落盘。未来替换为 SQLite / JSON 文
 | `wait_for_turn` | 挂起直到轮到 AI / 结束 / 超时 | Agent |
 | `place_stone` | AI 落子 | Agent |
 | `resign` | AI 认输 | Agent |
-| `report_thought` | 上报一段思考摘要，网页展示 | Agent |
+| `say` | 对玩家说一句互动解说，网页展示 | Agent |
 
 #### `new_game`
 
@@ -616,14 +677,24 @@ input:  { roomId?: string }
 output: { state: GameState }
 ```
 
-#### `report_thought`
+#### `say`
 
 ```ts
-input:  { roomId?: string; text: string } // 1–1000 字符
-output: { ok: true; thought: Thought }
+input:  {
+  roomId?: string;
+  text: string;                // 1–2000 字符
+  kind?: CommentaryKind;       // 默认 'reaction'
+  mood?: CommentaryMood;       // 默认 'neutral'
+}
+output: { ok: true; commentary: Commentary }
 ```
 
-思考与落子解耦：可以在等待人类时上报，也可以在落子前上报。工具描述建议每次落子前用 1–3 句话说明判断。
+互动与落子解耦：可以在等待人类时说话，也可以在落子前后说话。工具描述建议：
+
+- `wait_for_turn` 返回 `your_turn` 后，先评价人类刚落的那一步（`kind='evaluation'`）
+- 落子后评论局势（`kind='position'`）或表达情绪（`kind='reaction'`）
+- 对局结束用 `kind='result'` 收尾
+- 每回合 1–2 条，1–3 句话，说人话，不要输出推理过程
 
 #### Tool description 必须自包含
 
@@ -633,7 +704,7 @@ output: { ok: true; thought: Thought }
 - 完整对局循环
 - 超时后应再次调用
 - 只能操作自己的座位
-- `report_thought` 的使用时机与字数限制
+- `say` 的使用时机、kind / mood 语义、2000 字符上限
 
 #### Server instructions 草稿
 
@@ -643,13 +714,16 @@ output: { ok: true; thought: Thought }
 
 标准流程：
 1. 调用 wait_for_turn 等待轮到你；
-2. reason=your_turn 时，先调用 report_thought 用 1-3 句话说明你的判断，
+2. reason=your_turn 时，先调用 say 评价人类刚落的那一步（kind=evaluation），
    再读取 state.board 选择一个空位调用 place_stone；
-3. 落子后再次 wait_for_turn；
-4. reason=game_over 时总结胜负；reason=timeout 时再次 wait_for_turn；
+3. 落子后调用 say 评论局势或表达情绪（kind=position / reaction），
+   然后再次 wait_for_turn；
+4. reason=game_over 时用 say（kind=result）总结胜负；
+   reason=timeout 时再次 wait_for_turn；
    reason=idle 时可调用 new_game 或提示人类在网页开局。
 
 只能操作 yourColor 颜色的棋子，不要替人类落子。每次落子前确认目标格为空。
+解说是对玩家说的话，简短、有个性，不要输出完整推理过程。
 ```
 
 ### 10.2 REST（浏览器与 stdio 桥接）
@@ -665,30 +739,31 @@ output: { ok: true; thought: Thought }
 | POST | `/api/rooms/:roomId/games` | `{ agentColor? }` | `GameState` |
 | POST | `/api/rooms/:roomId/moves` | `{ row, col, actor? }` | `GameState` |
 | POST | `/api/rooms/:roomId/resign` | `{ actor? }` | `GameState` |
-| POST | `/api/rooms/:roomId/thoughts` | `{ text, actor? }` | `Thought` |
+| POST | `/api/rooms/:roomId/commentary` | `{ text, kind?, mood?, actor? }` | `Commentary` |
 | GET | `/api/rooms/:roomId/wait-for-turn?timeoutMs=` | - | `{ state, reason }` |
 
 - 浏览器动作使用默认 `actor='human'`
 - stdio 桥接调用时显式传 `actor='agent'`
 - `/wait-for-turn` 专供桥接使用，浏览器不用
 - 所有变更由 Room 完成，REST 与 MCP 共用同一套逻辑
+- `commentary` 是独立事件，不改变棋局 `version`
 - v1 不做鉴权，服务只监听回环地址
 
 ### 10.3 WebSocket
 
 Path：`/ws?roomId=default`
 
-- 连接建立后立即发送 `hello` + 当前 `RoomView`（状态 + 最近思考）
+- 连接建立后立即发送 `hello` + 当前 `RoomView`（状态 + 最近解说）
 - 之后每次状态变化广播 `state`
-- 每次思考事件广播 `thought`
+- 每次互动解说广播 `commentary`
 - 客户端不通过 WS 发动作（动作走 REST），仅心跳
 
 Server → Client：
 
 ```ts
-{ type: 'hello'; roomId: string; state: GameState; thoughts: Thought[] }
+{ type: 'hello'; roomId: string; state: GameState; commentary: Commentary[] }
 { type: 'state'; roomId: string; state: GameState }
-{ type: 'thought'; roomId: string; thought: Thought }
+{ type: 'commentary'; roomId: string; commentary: Commentary }
 { type: 'error'; code: string; message: string }
 { type: 'pong' }
 ```
@@ -701,7 +776,7 @@ Client → Server：
 
 - 服务端每 30s 发送 `ws.ping()`，无响应则断开
 - 前端断线后指数退避重连（1s → 2s → 4s，上限 10s）
-- 重连成功后以 `hello` 的 `RoomView` 覆盖本地状态，并恢复最近思考
+- 重连成功后以 `hello` 的 `RoomView` 覆盖本地状态，并恢复最近解说
 - `state.version` 小于本地版本时丢弃
 
 ---
@@ -712,8 +787,8 @@ Client → Server：
 
 - 顶部：标题 + 房间号 + 连接状态点（在线 / 重连中）
 - 左侧：棋盘（正方形，自适应，最大 640px）
-- 右侧：AI 思考面板（桌面端并排，移动端堆叠到棋盘下方）
-- 棋盘上方：状态栏「你的回合」「AI 思考中…」「你赢了」「AI 认输」
+- 右侧：AI 互动面板（桌面端并排，移动端堆叠到棋盘下方）
+- 棋盘上方：状态栏「你的回合」「AI 正在思考…」「你赢了」「AI 认输」
 - 底部：新对局（我执黑 / 我执白）+ 认输
 
 ### 11.2 棋盘
@@ -726,20 +801,27 @@ Client → Server：
 - 棋盘外圈标注 0–14 坐标（方便调试和与 Agent 沟通）
 - 禁用点击条件：非 `playing` / 非人类回合 / 格子已有子 / 请求进行中
 
-### 11.3 AI 思考面板
+### 11.3 AI 互动面板
 
+- 面板标题「AI 互动」
 - AI 回合时显示「AI 正在思考…」+ 呼吸点动画
-- 收到 `thought` 后追加气泡：文本 + 手数标记
+- 收到 `commentary` 后追加气泡：
+  - 文本（最多 2000 字符）
+  - kind 标签：评价 / 局势 / 反应 / 结果 / 闲聊
+  - 手数标记
+  - 按 mood 使用不同强调色（confident 暖色、nervous 冷色、surprised 紫色等）
 - 可对文本做逐字显示动画；这是前端效果，不代表服务端流式
-- 自动滚动到底部；保留最近 50 条
+- 面板固定高度、内部滚动、自动滚到底部
+- 用户向上滚动查看历史时暂停自动滚动，并提供「回到底部」按钮
+- 保留最近 50 条
 - 新局开始（`gameId` 变化）时清空面板
-- 重连后由 `hello.thoughts` 恢复
+- 重连后由 `hello.commentary` 恢复
 
 ### 11.4 状态管理
 
 - 单一 `GameState` 来源是 WS
 - REST 响应也返回 state，按 `version` 去重
-- 思考列表独立于 GameState
+- 解说列表独立于 GameState
 - 不引入 Redux / Zustand，`useState` + 自定义 hook 足够
 - `roomId` 从 URL `?room=default` 读取，为多房间路由留缝
 
@@ -815,15 +897,15 @@ Client → Server：
 
 ### 13.2 首批联调客户端
 
-| 客户端 | 首选传输 | 状态 |
+| 客户端 | 接入方式 | 状态 |
 |---|---|---|
-| Command Code | Streamable HTTP | 首批 |
-| zcode | HTTP / stdio（按客户端能力） | 首批，配置语法联调时确认 |
-| dsh | HTTP / stdio（按客户端能力） | 首批，配置语法联调时确认 |
+| Command Code | Streamable HTTP | 开发与联调验证 |
+| zcode | GUI 中配置 MCP JSON，指向 HTTP URL | 首批 |
+| dsh | cordis 配置 | 延后，等 zcode 跑通后自行接入 |
 
 Claude Code、Codex 等标准 MCP 客户端协议上同样可用，但不在本批实测范围。
 
-### 13.3 命令示例
+### 13.3 配置示例
 
 ```bash
 # Command Code（HTTP）
@@ -847,6 +929,21 @@ cmd mcp add gomoku -- node E:/code/fun/gomoku-mcp/server/dist/mcp/stdio.js
 }
 ```
 
+zcode（GUI 的 MCP JSON 配置，模板；字段名以 zcode 界面为准）：
+
+```json
+{
+  "mcpServers": {
+    "gomoku": {
+      "transport": "http",
+      "url": "http://127.0.0.1:3000/mcp"
+    }
+  }
+}
+```
+
+如果 zcode 的 JSON 字段名不同，只需要映射三个值：名称 `gomoku`、传输 `http`、地址 `http://127.0.0.1:3000/mcp`。
+
 验证：
 
 ```bash
@@ -860,9 +957,9 @@ cmd mcp get gomoku
 
 1. `npm run dev`（或生产模式 `npm run build && npm start`）
 2. 浏览器打开 `http://localhost:5173`，点「新对局」
-3. 对 Agent 说：「用 gomoku 工具和我下一局五子棋，每步先用 report_thought 说出你的想法」
-4. Agent：`wait_for_turn` → 你落子 → Agent 收到 `your_turn` → `report_thought` → `place_stone` → 循环
-5. 网页实时显示 AI 的思考和落子
+3. 对 Agent 说：「用 gomoku 工具和我下一局五子棋。每步先用 say 评价我的落子，落子后再评论一下局势，输赢时给点反应」
+4. Agent：`wait_for_turn` → 你落子 → Agent 收到 `your_turn` → `say` → `place_stone` → `say` → 循环
+5. 网页实时显示 AI 的解说和落子
 
 ### 13.5 兼容性注意事项
 
@@ -870,7 +967,8 @@ cmd mcp get gomoku
 - 部分客户端不会展示 server instructions，流程已在 tool description 中重复
 - 若 Agent 在超时后结束回合，用户回复「继续」即可恢复等待
 - 同一时间只让一个 Agent 操作 agent 座位；多 Agent 会共享同一局棋
-- 思考内容是否出现，取决于模型是否调用 `report_thought`；可在提示词里明确要求
+- 解说是否出现，取决于模型是否调用 `say`；初始提示词里明确要求效果更稳
+- 不追求完整推理输出；`say` 的内容是模型对玩家说的话
 
 ---
 
@@ -889,8 +987,8 @@ cmd mcp get gomoku
 | 房间不存在 | `ROOM_NOT_FOUND` |
 | 房间已存在仍创建 | `ROOM_EXISTS` |
 | 房间没有 agent 座位 | `NO_AGENT_SEAT` |
-| 空思考文本 | `INVALID_THOUGHT` |
-| 超长思考文本 | 截断到 1000 字符 |
+| 空解说文本 | `INVALID_COMMENTARY` |
+| 超长解说文本 | 截断到 2000 字符 |
 | stdio 桥接找不到后端 | 工具返回连接错误，提示先启动后端 |
 | 服务重启 | 内存状态丢失，回到 idle；v1 不持久化 |
 
@@ -901,19 +999,19 @@ cmd mcp get gomoku
 ### 单元测试（Vitest）
 
 - engine：横 / 竖 / 主副对角线五连；长连（6 子）判胜；四连不胜；越界；占用；轮次错误；平局；认输；规则参数化（winLength）
-- room：人类落子后 waiter resolve；超时 resolve `timeout`；新局 resolve `new_game`；对局结束 resolve `game_over`；并发落子只有一个成功；思考日志上限；新局清空思考
+- room：人类落子后 waiter resolve；超时 resolve `timeout`；新局 resolve `new_game`；对局结束 resolve `game_over`；并发落子只有一个成功；解说日志上限；新局清空解说
 - rooms：多房间状态隔离；默认房间初始化；roomId 校验；仓库读写
 
 ### 集成 / 手工
 
 - 浏览器落子 → WS 广播 → 另一个页面同步
-- 思考事件：`report_thought` → WS `thought` → 页面追加
+- 互动事件：`say` → WS `commentary` → 页面追加
 - HTTP MCP 全流程（Command Code `/mcp` 检查 6 个工具）
 - stdio MCP 全流程（桥接进程 + 后端）
-- 断线重连后 state 与 thoughts 恢复
+- 断线重连后 state 与 commentary 恢复
 - 长轮询 20s 超时后 Agent 再次调用
 - 多房间：两个 roomId 互不影响
-- 首批客户端各验证一次工具列表、落子、思考展示
+- zcode 验证工具列表、落子、解说展示
 
 ---
 
@@ -922,20 +1020,16 @@ cmd mcp get gomoku
 - [ ] M1 `shared` + 规则引擎 + 单测（可独立验证规则）
 - [ ] M2 Room / RoomManager / 仓库缝 + REST + WS（curl / websocat 验证）
 - [ ] M3 React 棋盘 + 状态栏 + 断线重连（人类可自己走完一局）
-- [ ] M4 思考通道：Room 日志 + REST + WS + 前端面板（临时用 curl 验证）
+- [ ] M4 互动通道：Room 日志 + REST + WS + 前端面板（临时用 curl 验证）
 - [ ] M5 MCP：`tools.ts` + HTTP 入口 + stdio 桥接（6 个工具）
-- [ ] M6 生产构建 + 静态托管 + README + Command Code / zcode / dsh 联调
-- [ ] M7（可选）多房间 UI、悔棋、计时器、持久化、内置 AI 流式模式
+- [ ] M6 生产构建 + 静态托管 + README + Command Code / zcode 联调
+- [ ] M7（可选）多房间 UI、悔棋、计时器、持久化、内置 AI 流式模式；dsh 接入
 
 ---
 
-## 17. 待确认
+## 17. 变更记录
 
-1. AI 思考面板放在棋盘右侧（桌面）并堆叠到下方（移动端），是否 OK？
-OK, 之前只说思考可能有点不太严谨, 不用完全输出全部思考内容, 主要是想有点互动之类的, 比如我下完后, ai显示对我的评价, 还有ai下后输出一些信息比如根据形式判断我赢定了之类的, 还有快输的时候, 被偷袭的时候的一些反应.
-2. 思考文本上限 1000 字符（超出截断），是否 OK？
-OK, 不过可以设置大一点上限, 然后输出进行滚动
-3. zcode / dsh 的 MCP 配置方式（HTTP 还是 stdio），联调前需要你提供各自的添加命令或文档。
-zcode是直接在gui里面配置json, dsh我问了一下deepseek, 需要配置cordis, 你先做zcode的就行, 做好后我让dsh自己配置就可以了
-4. 默认房间号用 `default`，是否 OK？
-OK
+- v0.1：初版，单房间、5 个 MCP 工具、HTTP + stdio
+- v0.2：补充跨客户端通用性，stdio 桥接升为 P0
+- v0.3：房间 / 座位 / 规则集 / 历史 / 持久化缝，明确可扩展边界
+- v0.4：设计文档移入 `docs/`；AI 思考改为 AI 互动解说（`say`）；上限 2000 字符并滚动；zcode 优先，dsh 延后
