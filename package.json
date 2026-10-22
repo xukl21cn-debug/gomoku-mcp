@@ -1,0 +1,26 @@
+{
+  "name": "gomoku-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Play Gomoku against an AI agent over MCP",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "shared",
+    "server"
+  ],
+  "scripts": {
+    "build:shared": "npm run build -w shared",
+    "build:server": "npm run build -w server",
+    "build": "npm run build:shared && npm run build:server",
+    "test": "npm run build:shared && npm test -w server",
+    "typecheck": "npm run build:shared && npm run typecheck -w server"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}

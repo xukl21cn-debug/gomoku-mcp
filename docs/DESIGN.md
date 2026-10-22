@@ -298,6 +298,7 @@ gomoku-mcp/
 │   └── src/
 │       ├── index.ts
 │       ├── game.ts              # GameState / Move / RuleSet / Commentary
+│       ├── constants.ts         # 默认规则、上限、房间号规则
 │       └── protocol.ts          # WS 消息、REST DTO
 ├── server/
 │   ├── package.json
@@ -1017,7 +1018,7 @@ cmd mcp get gomoku
 
 ## 16. 里程碑
 
-- [ ] M1 `shared` + 规则引擎 + 单测（可独立验证规则）
+- [x] M1 `shared` + 规则引擎 + 单测（可独立验证规则）
 - [ ] M2 Room / RoomManager / 仓库缝 + REST + WS（curl / websocat 验证）
 - [ ] M3 React 棋盘 + 状态栏 + 断线重连（人类可自己走完一局）
 - [ ] M4 互动通道：Room 日志 + REST + WS + 前端面板（临时用 curl 验证）
