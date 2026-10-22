@@ -268,6 +268,7 @@ web/        只依赖 shared 类型与 REST/WS 协议
 | 层 | 选择 | 理由 |
 |---|---|---|
 | 运行时 | Node.js ≥ 20 | MCP TypeScript SDK、WebSocket 生态成熟 |
+| 包管理 | pnpm | workspace 严格、安装快 |
 | 语言 | TypeScript（strict） | 前后端共享类型 |
 | HTTP | Express 5 | 简单，够用 |
 | WebSocket | `ws` | 轻量 |
@@ -286,7 +287,8 @@ web/        只依赖 shared 类型与 REST/WS 协议
 
 ```
 gomoku-mcp/
-├── package.json                 # npm workspaces: shared / server / web
+├── package.json                 # 根脚本、devDependencies、packageManager
+├── pnpm-workspace.yaml          # pnpm workspace: shared / server
 ├── .gitignore
 ├── README.md                    # 项目入口，链接到设计文档
 ├── docs/

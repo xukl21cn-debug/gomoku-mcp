@@ -9,12 +9,12 @@ M1 完成：`shared` 类型、规则引擎与 28 个单元测试。
 ## 开发
 
 ```bash
-npm install --include=dev
-npm test
-npm run build
+pnpm install
+pnpm test
+pnpm build
 ```
 
-> 当前环境的 `NODE_ENV=production` 会让 npm 默认省略 devDependencies；如果安装后找不到 `vitest` / `tsc`，用 `--include=dev` 重新安装。
+包管理器：pnpm（版本见 `package.json` 的 `packageManager` 字段）。
 
 ## 设计文档
 

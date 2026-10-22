@@ -4,19 +4,17 @@
   "private": true,
   "type": "module",
   "description": "Play Gomoku against an AI agent over MCP",
+  "packageManager": "pnpm@10.29.2",
   "engines": {
-    "node": ">=20"
+    "node": ">=20",
+    "pnpm": ">=10"
   },
-  "workspaces": [
-    "shared",
-    "server"
-  ],
   "scripts": {
-    "build:shared": "npm run build -w shared",
-    "build:server": "npm run build -w server",
-    "build": "npm run build:shared && npm run build:server",
-    "test": "npm run build:shared && npm test -w server",
-    "typecheck": "npm run build:shared && npm run typecheck -w server"
+    "build:shared": "pnpm --filter @gomoku/shared build",
+    "build:server": "pnpm --filter @gomoku/server build",
+    "build": "pnpm build:shared && pnpm build:server",
+    "test": "pnpm build:shared && pnpm --filter @gomoku/server test",
+    "typecheck": "pnpm build:shared && pnpm --filter @gomoku/server typecheck"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
